@@ -5,34 +5,12 @@ import gleam/int
 import gleam/io
 import gleam/list
 import gleam/otp/actor
-import gleam/result
 
 const epsilon = 0.000001
 
-fn usage() {
-  io.println_error("usage: ./program <upper_bound>: Int <seq_length>: Int")
-}
-
-pub fn main() {
-  // Parse command line arguments
-  case argv.load().arguments {
-    [b, l] -> {
-      case int.parse(b), int.parse(l) {
-        Ok(bound), Ok(length) if length > 0 && bound > 0 ->
-          case cli_run(bound, length) {
-            Ok(_) -> Nil
-            Error(err) -> io.println_error("Error: " <> err)
-          }
-        _, _ -> usage()
-      }
-    }
-    _ -> usage()
-  }
-}
-
 pub type ControlMessage {
   Valid(Int)
-  Panic(String)
+  Panic(id: Int, err: String)
 }
 
 pub type WorkerMessage {
@@ -44,39 +22,56 @@ pub type State {
   State(id: Int, pipe: Subject(ControlMessage))
 }
 
-fn cli_run(bound: Int, length: Int) -> Result(Nil, String) {
-  let assert Ok(accumulator) =
-    actor.new(0)
-    |> actor.on_message(fn(_, msg) {
-      case msg {
-        Valid(n) -> io.println(int.to_string(n))
-        Panic(err) -> io.println_error("Worker panicked: " <> err)
+fn usage() {
+  "usage: ./program <upper_bound>: Int <seq_length>: Int" |> io.println_error
+}
+
+pub fn main() {
+  case argv.load().arguments {
+    [b, l] -> {
+      case int.parse(b), int.parse(l) {
+        Ok(bound), Ok(length) if length > 0 && bound > 0 ->
+          case cli_run(bound, length) {
+            Ok(_) -> Nil
+            Error(err) -> { "Error: " <> err } |> io.println_error
+          }
+        _, _ -> usage()
       }
-      actor.continue(0)
+    }
+    _ -> usage()
+  }
+}
+
+fn cli_run(bound: Int, length: Int) -> Result(Nil, String) {
+  let assert Ok(aggregator) =
+    actor.new(0)
+    |> actor.on_message(fn(s, msg) {
+      case msg {
+        Valid(n) -> int.to_string(n) |> io.println
+        Panic(id, err) ->
+          { "Worker<" <> int.to_string(id) <> "> panicked: " <> err }
+          |> io.println_error
+      }
+      actor.continue(s)
     })
     |> actor.start
 
-  echo sum_of_squares(24)
-  echo sum_of_squares(6)
-  echo { sum_of_squares(24) -. sum_of_squares(6) }
-
+  let workers =
   list.range(1, bound)
-  |> list.map(fn(id) { worker_run(id, accumulator.data) })
-  |> list.map(fn(w) {
-    actor.send(w, Work(length))
-    w
-  })
-  |> list.each(fn(w) { actor.call(w, 1000, Kill) })
+    |> list.map(fn(id) { worker_run(id, aggregator.data) })
+
+  workers |> list.each(fn(w) { actor.send(w, Work(length)) })
+  workers |> list.each(fn(w) { actor.call(w, 1000, Kill) })
 
   Ok(Nil)
 }
 
 fn worker_run(
   id: Int,
-  accumulator: Subject(ControlMessage),
+  aggregator: Subject(ControlMessage),
 ) -> Subject(WorkerMessage) {
   let assert Ok(started) =
-    actor.new(State(id, accumulator))
+    actor.new(State(id, aggregator))
     |> actor.on_message(handle)
     |> actor.start
 
@@ -88,10 +83,6 @@ fn handle(state: State, msg: WorkerMessage) -> actor.Next(State, WorkerMessage) 
     Work(length) -> {
       case
         {
-          // list.range(state.id, state.id + length - 1)
-          // |> list.map(fn(x) { x * x })
-          // |> list.reduce(fn(acc, x) { acc + x })
-          // |> result.try(int.square_root)
           {
             sum_of_squares(state.id + length - 1)
             -. sum_of_squares(state.id - 1)
@@ -110,7 +101,7 @@ fn handle(state: State, msg: WorkerMessage) -> actor.Next(State, WorkerMessage) 
             True -> actor.send(state.pipe, Valid(state.id))
             False -> Nil
           }
-        Error(_) -> actor.send(state.pipe, Panic("error: invalid sequence"))
+        Error(_) -> actor.send(state.pipe, Panic(state.id, "invalid sequence"))
       }
       actor.continue(state)
     }
